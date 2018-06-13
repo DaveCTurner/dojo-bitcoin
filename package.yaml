@@ -1,0 +1,32 @@
+name:                dojo-bitcoin
+version:             0.1.0.0
+github:              "githubuser/dojo-bitcoin"
+license:             BSD3
+author:              "Author name here"
+maintainer:          "example@example.com"
+copyright:           "2018 Author name here"
+
+description:         Please see the README on GitHub at <https://github.com/githubuser/dojo-bitcoin#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- cryptonite
+- text
+- bytestring
+- hspec
+- base16-bytestring
+- memory
+- http-client
+- http-client-tls
+- http-types
+- aeson
+- time
+
+executables:
+  dojo-bitcoin:
+    main:                Main.hs
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+
