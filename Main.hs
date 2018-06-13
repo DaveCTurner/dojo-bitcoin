@@ -1,9 +1,9 @@
-{-# LANGUAGE BangPatterns      #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 
 module Main where
 
+import           Control.Monad
 import           Crypto.Hash
 import           Data.Aeson
 import           Data.Bits
@@ -18,6 +18,7 @@ import           Data.Word
 import           Network.HTTP.Client
 import           Network.HTTP.Client.TLS
 import           Network.HTTP.Types.Header
+import           Network.HTTP.Types.Status 
 import           Test.Hspec
 
 data Block = Block
@@ -28,50 +29,24 @@ data Block = Block
   , blockNonce        :: !Int
   } deriving (Show, Eq)
 
-instance ToJSON Block where
-  toJSON b@Block{..} = object
-    [ "index" .= show blockIndex
-    , "minedBy" .= T.decodeUtf8 blockMinedBy
-    , "data" .= T.decodeUtf8 blockData
-    , "previousHash" .= T.decodeUtf8 blockPreviousHash
-    , "nonce" .= show blockNonce
-    , "hash" .= T.decodeUtf8 (hashFromBlock b)
+hashFromBlock :: Block -> B.ByteString
+hashFromBlock Block{..} = B.map upper $ B16.encode $ convert h
+  where
+  h :: Digest SHA256
+  h = hash $ B.intercalate " "
+    [ T.encodeUtf8 $ T.pack $ show blockIndex
+    , blockMinedBy
+    , blockData
+    , blockPreviousHash
+    , T.encodeUtf8 $ T.pack $ show  blockNonce
     ]
 
-main :: IO ()
-main = do
-  toUpload <- B.readFile "transaction.txt"
+  upper w = if w > 64 then w .&. 0x5f else w
 
-  manager  <- newManager tlsManagerSettings
-  request  <- parseRequest "https://yorkshire-brassbitcoin.azurewebsites.net/api/blocks?latest=true"
-  response <- httpLbs request {requestHeaders = [(hAccept, "text/plain")]} manager
-
-  miningStart <- getCurrentTime
-  let !nextBlock = mineNextBlock toUpload $ readBlock $ BL.toStrict $ responseBody response
-  putStrLn $ "Found next block: " ++ show nextBlock
-  miningEnd <- getCurrentTime
-  putStrLn $ "took: " ++ show (diffUTCTime miningEnd miningStart)
-
-  uploadRequestBase <- parseRequest "http://yorkshire-brassbitcoin.azurewebsites.net/Blocks/Upload"
-  let uploadRequest = uploadRequestBase
-        { method = "POST"
-        , requestHeaders =
-          [ (hContentType, "application/json")
-          ]
-        , requestBody = RequestBodyLBS $ encode nextBlock
-        }
-  httpLbs uploadRequest manager
-  return ()
-
-mineNextBlock :: B.ByteString -> Block -> Block
-mineNextBlock d b = let
-  b' = mineBlock Block
-    { blockIndex = blockIndex b + 1
-    , blockMinedBy = "DavidT"
-    , blockData = d
-    , blockPreviousHash = hashFromBlock b
-    , blockNonce = 1
-    } in b'
+mineBlock :: Block -> Block
+mineBlock b
+  | "0000" `B.isPrefixOf` hashFromBlock b = b 
+  | otherwise                             = mineBlock b { blockNonce = blockNonce b + 1 }
 
 readBlock :: B.ByteString -> Block
 readBlock s = Block{..}
@@ -83,29 +58,51 @@ readBlock s = Block{..}
     blockIndex = read $ T.unpack $ T.decodeUtf8 blockIndexBytes
     blockNonce = read $ T.unpack $ T.decodeUtf8 blockNonceBytes
 
-mineBlock :: Block -> Block
-mineBlock b = if "0000" `B.isPrefixOf` hashFromBlock b then b else mineBlock b { blockNonce = blockNonce b + 1 }
+instance ToJSON Block where
+  toJSON b@Block{..} = object
+    [ "index"        .= show blockIndex
+    , "minedBy"      .= T.decodeUtf8 blockMinedBy
+    , "data"         .= T.decodeUtf8 blockData
+    , "previousHash" .= T.decodeUtf8 blockPreviousHash
+    , "nonce"        .= show blockNonce
+    , "hash"         .= T.decodeUtf8 (hashFromBlock b)
+    ]
 
-hashFromBlock :: Block -> B.ByteString
-hashFromBlock Block{..} = hashAndFormat $ B.intercalate " "
-  [ showByteString blockIndex
-  , blockMinedBy
-  , blockData
-  , blockPreviousHash
-  , showByteString blockNonce
-  ]
+main :: IO ()
+main = do
+  manager  <- newManager tlsManagerSettings
+  request  <- parseRequest "https://yorkshire-brassbitcoin.azurewebsites.net/api/blocks?latest=true"
+  response <- httpLbs request {requestHeaders = [(hAccept, "text/plain")]} manager
+  let lastBlock = readBlock $ BL.toStrict $ responseBody response
+  putStrLn $ "Found last block: " ++ show lastBlock
 
-hashAndFormat :: B.ByteString -> B.ByteString
-hashAndFormat s = B.map upper $ B16.encode $ convert h
+  loop manager lastBlock
+
   where
-    h :: Digest SHA256
-    h = hash s
+  loop manager lastBlock = do
+    transactionData <- B.readFile "transaction.txt"
+    miningStart <- getCurrentTime
+    let nextBlock = mineBlock $ Block
+          { blockIndex = blockIndex lastBlock + 1
+          , blockMinedBy = "DavidT"
+          , blockData = transactionData
+          , blockPreviousHash = hashFromBlock lastBlock
+          , blockNonce = 1
+          }
+    putStrLn $ "Found next block: " ++ show nextBlock
+    miningEnd <- getCurrentTime
+    putStrLn $ "took: " ++ show (diffUTCTime miningEnd miningStart)
 
-upper :: Word8 -> Word8
-upper w = if w > 64 then w .&. 0x5f else w
-
-showByteString :: Show a => a -> B.ByteString
-showByteString = T.encodeUtf8 . T.pack . show
+    uploadRequestBase <- parseRequest "http://yorkshire-brassbitcoin.azurewebsites.net/Blocks/Upload"
+    let uploadRequest = uploadRequestBase
+          { method = "POST"
+          , requestHeaders =
+            [ (hContentType, "application/json")
+            ]
+          , requestBody = RequestBodyLBS $ encode nextBlock
+          }
+    uploadResponse <- httpLbs uploadRequest manager
+    when (statusCode (responseStatus uploadResponse) == 201) $ loop manager nextBlock
 
 test :: IO ()
 test = hspec $ do
